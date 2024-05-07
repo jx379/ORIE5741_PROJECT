@@ -1,0 +1,553 @@
+---
+title: "5741final"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# install.packages("VIM")
+# install.packages("DEoptimR")
+# install.packages("laeken")
+# install.packages("ggsignif")
+# install.packages("rstatix")
+# install.packages("factoextra")
+# install.packages("ggplot2")
+# install.packages("caret")
+# install.packages("dplyr")
+# install.packages("glmnet")
+# install.packages("tibble")
+# install.packages("boot")
+# install.packages("Metrics")
+# install.packages("stats")
+library(VIM)
+library(DEoptimR)
+library(laeken)
+library(ggsignif)
+library(rstatix)
+library(factoextra)
+library(ggplot2)
+library(caret)
+library(dplyr)
+library(glmnet)
+library(tibble)
+library(boot)
+library(Metrics)
+library(stats)
+```
+
+```{r}
+getwd()
+```
+
+
+```{r}
+setwd("/Users/jzxu/Downloads")
+df = read.csv("Melbourne_housing.csv")
+# Check missing values
+summary(df)
+```
+
+```{r}
+#Delete all missing value in response variable
+df = df[!is.na(df$Price),]
+```
+
+
+```{r}
+# Visualize missing values
+aggr_plot = aggr(df, col=c('navyblue','yellow'), numbers=TRUE, sortVars=TRUE, 
+                  labels=names(df), cex.axis=.7, gap=3,ylab=c("Histogram of missing data","Pattern"))
+```
+
+
+```{r}
+#Delete the column YearBuilt since there are over 50% of missing value in dataset
+df = df[,-15]
+
+#Use 0 to fill all missing values in column Bedroom, Bathrrom and Car
+df = df %>%
+  mutate(
+    Bedroom = ifelse(is.na(Bedroom), 0, Bedroom),
+    Bathroom = ifelse(is.na(Bathroom), 0, Bathroom),
+    Car = ifelse(is.na(Car), 0, Car)
+  )
+
+```
+
+```{r}
+# Calculate the mean of LandSize excluding NA values
+mean_landsize = mean(df$Landsize, na.rm = TRUE)
+
+# Replace NA values in Landsize with the calculated mean
+df = df %>%
+  mutate(Landsize = ifelse(is.na(Landsize), mean_landsize, Landsize))
+
+```
+
+```{r}
+#Now, we only have missing values for column Latitude and Longtitude
+#Try to see the relationship between these three variables
+if (is.numeric(df$Postcode)) {
+  plot(df$Longitude, df$Postcode, main="Longitude vs Postcode", xlab="Longitude", ylab="Postcode")
+} else {
+  ggplot(df, aes(x=Longtitude, y=Latitude)) + 
+    geom_point(aes(color=factor(Postcode)), alpha=0.5) + 
+    theme_minimal() + 
+    ggtitle("Scatterplot of Latitude and Longitude Colored by Postcode")
+}
+
+```
+
+```{r}
+#Now, considering about the relationship between Latitude, Longtitude, Postcode and Price
+#Since there are many missing values in latitude and longtitude, if we can check these two columns
+#are the compliments of postcode, we can just delete them.
+
+# Build the full model
+full_model = lm(Price ~ Latitude + Longtitude + Postcode, data=df)
+summary(full_model)
+
+# Check the coefficients for importance
+coef(full_model)
+
+# Remove one variable at a time and compare the model
+model_without_latitude = lm(Price ~ Longtitude + Postcode, data=df)
+model_without_longitude = lm(Price ~ Latitude + Postcode, data=df)
+model_without_postcode = lm(Price ~ Latitude + Longtitude, data=df)
+
+```
+
+```{r}
+# Compare the models using an appropriate metric, like R-squared
+comparison = data.frame(
+  Full_Model = summary(full_model)$r.squared,
+  Without_Latitude = summary(model_without_latitude)$r.squared,
+  Without_Longitude = summary(model_without_longitude)$r.squared,
+  Without_Postcode = summary(model_without_postcode)$r.squared
+)
+
+# Print the comparison
+print(comparison)
+
+```
+
+```{r}
+#If we delete postcode but maintain Longtitude and Latitude, the value is only around 0.06.
+#Therefore, we can delete these two columns for much better prediction
+df = df[, -c(16,17)]
+
+#Remove outliers in Price
+hist(df$Price)
+hist(log(df$Price))
+df = subset(df,df$Price >= exp(12.5) & df$Price<=exp(15.5))
+```
+
+```{r}
+# Frequency encoding example
+#Since there are so many categories in the these columns, we can replace each 
+#category with its frequency (or count) in the dataset
+df$Suburb = as.numeric(ave(rep(1, nrow(df)), df$Suburb, FUN = length))
+df$CouncilArea = as.numeric(ave(rep(1, nrow(df)), df$CouncilArea, FUN = length))
+df$SellerG = as.numeric(ave(rep(1, nrow(df)), df$SellerG, FUN = length))
+#Also, there are so many categories in the Column Address (26625 levels) and these
+#specific addresses are in the region of Suburb. It may not helpful for us to do predictions
+df= df[,-2]
+
+#Change Distance to numeric type
+df$Distance = as.numeric(df$Distance)
+df$Postcode = as.numeric(df$Postcode)
+df$BuildingArea = as.numeric(df$BuildingArea)
+df$Propertycount = as.numeric(df$Propertycount)
+#Change Date to weekday
+df$Date=as.POSIXct(df$Date)
+df$Date=weekdays(df$Date)
+df$Date=as.factor(df$Date)
+
+#Change these variables to factor type
+df$Type = as.factor(df$Type)
+df$Method = as.factor(df$Method)
+df$Regionname = as.factor(df$Regionname)
+df$ParkingArea = as.factor(df$ParkingArea)
+
+# Check for infinite values
+sapply(df, function(x) sum(is.infinite(x)))
+# Removing rows with NA
+df = na.omit(df)
+# Removing rows with Inf
+df = df[!is.infinite(df$BuildingArea), ]
+```
+
+```{r}
+#Set Training dataset and Testing Dataset
+# Splitting the data
+set.seed(1)
+index = createDataPartition(df$Price, p = 0.8, list = FALSE)
+train_data = df[index, ]
+test_data = df[-index, ]
+
+#Linear Regression
+lmfit = lm(Price~.,data=train_data)
+test_pred = predict(lmfit, test_data)
+train_pred = predict(lmfit, train_data)
+
+# Calculate RMSE and R-squared for training data
+train_rmse = rmse(train_data$Price, train_pred)
+train_r2 = cor(train_data$Price, train_pred)^2
+
+# Calculate RMSE and R-squared for testing data
+test_rmse = rmse(test_data$Price, test_pred)
+test_r2 = cor(test_data$Price, test_pred)^2
+
+# Print the metrics
+cat("Training RMSE:", train_rmse, "\nTraining R-squared:", train_r2, "\n")
+cat("Testing RMSE:", test_rmse, "\nTesting R-squared:", test_r2, "\n")
+
+```
+
+```{r}
+# Apply PCA
+# Dummy encode the factor variables
+df_numeric <- model.matrix(~ . - 1, data = df)  # The '-1' omits the intercept term
+
+pca_result <- prcomp(df_numeric, scale. = TRUE) # scale. = TRUE standardizes the data
+
+# Summarize the PCA results
+summary(pca_result)
+
+# Transform the original dataset
+#Choosing n = 22 since the first 22 components gives nearly 80% culmative variance
+pca_data <- predict(pca_result, df_numeric)[, 1:22] # where 'n' is the number of components you chose
+
+# Add 'Price' to the PCA-transformed data
+pca_data_reg <- cbind(Price = df$Price, pca_data)
+pca_data_reg = as.data.frame(pca_data_reg)
+pca_data_reg_train = pca_data_reg[index,]
+pca_data_reg_test = pca_data_reg[-index,]
+
+#Now, redoing the linear regression model again to see how it performs compare to the above one
+lmfit_pca = lm(Price~.,data=pca_data_reg_train)
+test_pred_pca = predict(lmfit_pca, pca_data_reg_test)
+train_pred_pca = predict(lmfit_pca, pca_data_reg_train)
+
+# Calculate RMSE and R-squared for training data
+train_rmse_pca = rmse(pca_data_reg_train$Price, train_pred_pca)
+train_r2_pca = cor(pca_data_reg_train$Price, train_pred_pca)^2
+
+# Calculate RMSE and R-squared for testing data
+test_rmse_pca = rmse(pca_data_reg_test$Price, test_pred_pca)
+test_r2_pca = cor(pca_data_reg_test$Price, test_pred_pca)^2
+
+# Print the metrics
+cat("Training RMSE:", train_rmse_pca, "\nTraining R-squared:", train_r2_pca, "\n")
+cat("Testing RMSE:", test_rmse_pca, "\nTesting R-squared:", test_r2_pca, "\n")
+
+
+```
+```{r}
+loadings <- pca_result$rotation # or use prcomp object
+# Create a matrix of selected components loadings
+selected_loadings <- loadings[, c(1:7, 9:11,15:17, 19:22)]
+
+# Find the variables with the highest absolute loading values on each selected component
+high_loading_vars <- apply(selected_loadings, 2, function(x) {
+  names(x)[which.max(abs(x))]
+})
+# Print the names of variables with the highest loadings for each component
+print(high_loading_vars)
+```
+
+```{r}
+# install.packages("randomForest")
+install.packages("gbm3")
+# install.packages("adabag")
+```
+
+```{r}
+# Load necessary library for XGBoost
+install.packages("xgboost")
+library(xgboost)
+
+# Prepare data for xgboost
+dtrain <- xgb.DMatrix(data = model.matrix(~ ., data = train_data), label = train_data$Price)
+dtest <- xgb.DMatrix(data = model.matrix(~ ., data = test_data), label = test_data$Price)
+
+# Parameters for XGBoost
+params <- list(
+  booster = "gbtree",
+  objective = "reg:squarederror",
+  eta = 0.1,
+  max_depth = 6,
+  min_child_weight = 1,
+  subsample = 0.5,
+  colsample_bytree = 0.7
+)
+
+# Training model
+set.seed(1)
+xgb_model <- xgb.train(params = params, data = dtrain, nrounds = 100)
+
+# Predictions
+xgb_pred_train <- predict(xgb_model, dtrain)
+xgb_pred_test <- predict(xgb_model, dtest)
+
+# Calculate RMSE and R-squared
+xgb_train_rmse = rmse(train_data$Price, xgb_pred_train)
+xgb_train_r2 = cor(train_data$Price, xgb_pred_train)^2
+xgb_test_rmse = rmse(test_data$Price, xgb_pred_test)
+xgb_test_r2 = cor(test_data$Price, xgb_pred_test)^2
+
+# Print the metrics
+cat("XGBoost Training RMSE:", xgb_train_rmse, "R-squared:", xgb_train_r2, "\n")
+cat("XGBoost Testing RMSE:", xgb_test_rmse, "R-squared:", xgb_test_r2, "\n")
+
+
+```
+
+```{r}
+# Given a extremely high R-squared and low RMSE, XGBoost may induce overfitting.
+
+# Implementing additional validations and checks 
+# to ensure the robustness and generalization capabilities of XGBoost model
+# Load necessary library
+library(xgboost)
+library(caret)  # for creating folds
+
+# Create 10 folds
+folds <- createFolds(train_data$Price, k = 10, list = TRUE, returnTrain = TRUE)
+
+# Store results
+cv_results <- data.frame(RMSE = numeric(10), R2 = numeric(10))
+
+# Perform 10-fold cross-validation
+for(i in seq_along(folds)) {
+  train_fold <- train_data[folds[[i]], ]
+  test_fold <- train_data[-folds[[i]], ]
+  
+  dtrain_fold <- xgb.DMatrix(data = model.matrix(~ ., data = train_fold), label = train_fold$Price)
+  dtest_fold <- xgb.DMatrix(data = model.matrix(~ ., data = test_fold), label = test_fold$Price)
+  
+  xgb_model_fold <- xgb.train(params = params, data = dtrain_fold, nrounds = 100)
+  pred_fold <- predict(xgb_model_fold, dtest_fold)
+  
+  # Calculate metrics
+  cv_results$RMSE[i] <- rmse(test_fold$Price, pred_fold)
+  cv_results$R2[i] <- cor(test_fold$Price, pred_fold)^2
+}
+
+# Summary of results
+summary(cv_results)
+
+```
+
+```{r}
+# Compute feature importance
+importance_matrix <- xgb.importance(feature_names = colnames(model.matrix(~ ., data = train_data)), model = xgb_model)
+xgb.plot.importance(importance_matrix)
+
+```
+
+```{r}
+# Predict on training data for residual analysis
+train_pred <- predict(xgb_model, dtrain)
+
+# Calculate residuals
+residuals <- train_data$Price - train_pred
+
+# Plot residuals
+plot(residuals, type = 'p', main = "Residuals Plot", xlab = "Observed values", ylab = "Residuals")
+abline(h = 0, col = "red")
+
+```
+
+```{r}
+# Use caret for automated tuning
+control <- trainControl(method = "cv", number = 10)
+grid <- expand.grid(nrounds = 100,
+                    max_depth = c(4, 6, 8),
+                    eta = c(0.01, 0.1),
+                    gamma = 0,
+                    colsample_bytree = 1,
+                    min_child_weight = 1,
+                    subsample = c(0.5, 0.75, 1))  # Adding subsample to the grid
+
+# Tune the model
+tune_result <- train(x = model.matrix(~ ., data = train_data), y = train_data$Price,
+                     method = "xgbTree",
+                     trControl = control,
+                     tuneGrid = grid)
+print(tune_result)
+
+
+```
+
+```{r}
+# Using XGBoost with PCA-transformed Data
+# Load XGBoost library
+library(xgboost)
+
+# Prepare data for XGBoost
+dtrain_pca <- xgb.DMatrix(data = as.matrix(pca_data_reg_train[,-1]), label = pca_data_reg_train$Price)
+dtest_pca <- xgb.DMatrix(data = as.matrix(pca_data_reg_test[,-1]), label = pca_data_reg_test$Price)
+
+# Parameters for XGBoost
+params_pca <- list(
+  booster = "gbtree",
+  objective = "reg:squarederror",
+  eta = 0.1,
+  max_depth = 6,
+  min_child_weight = 1,
+  subsample = 0.75,
+  colsample_bytree = 0.75
+)
+
+# Training the XGBoost model on PCA data
+xgb_model_pca <- xgb.train(params = params_pca, data = dtrain_pca, nrounds = 100)
+
+# Prediction
+pred_pca_train <- predict(xgb_model_pca, dtrain_pca)
+pred_pca_test <- predict(xgb_model_pca, dtest_pca)
+
+# Evaluation
+train_rmse_pca_xgb <- sqrt(mean((pca_data_reg_train$Price - pred_pca_train)^2))
+test_rmse_pca_xgb <- sqrt(mean((pca_data_reg_test$Price - pred_pca_test)^2))
+
+# Prediction
+pred_pca_train <- predict(xgb_model_pca, dtrain_pca)
+pred_pca_test <- predict(xgb_model_pca, dtest_pca)
+
+# Evaluation for RMSE
+train_rmse_pca_xgb <- sqrt(mean((pca_data_reg_train$Price - pred_pca_train)^2))
+test_rmse_pca_xgb <- sqrt(mean((pca_data_reg_test$Price - pred_pca_test)^2))
+
+# Calculate R-squared
+train_r2_pca_xgb <- cor(pca_data_reg_train$Price, pred_pca_train)^2
+test_r2_pca_xgb <- cor(pca_data_reg_test$Price, pred_pca_test)^2
+
+cat("Training RMSE with PCA XGBoost:", train_rmse_pca_xgb, "\n")
+cat("Training R-squared with PCA XGBoost:", train_r2_pca_xgb, "\n")
+cat("Testing RMSE with PCA XGBoost:", test_rmse_pca_xgb, "\n")
+cat("Testing R-squared with PCA XGBoost:", test_r2_pca_xgb, "\n")
+
+
+```
+```{r}
+# Compute feature importance correctly
+num_features <- ncol(as.matrix(pca_data_reg_train[,-1])) # Adjust this as needed
+feature_names <- paste0("PC", 1:num_features)
+importance_matrix <- xgb.importance(feature_names = feature_names, model = xgb_model_pca)
+xgb.plot.importance(importance_matrix)
+```
+
+```{r}
+
+# Assuming pca_result is available with PCA results
+loadings <- pca_result$rotation
+
+# Find high-loading variables for each PCA component
+high_loading_vars <- apply(loadings, 2, function(x) {
+  names(x)[which.max(abs(x))]
+})
+
+# Create enhanced feature names with PCA component and high-loading variable
+enhanced_feature_names <- paste0("PC", 1:22, " (", high_loading_vars, ")")
+
+# Compute feature importance with these enhanced names
+importance_matrix <- xgb.importance(feature_names = feature_names, model = xgb_model_pca)
+
+
+# Plot the feature importance using ggplot2 or base plot in xgboost
+library(ggplot2)
+ggplot(importance_matrix, aes(x = Gain, y = Feature)) +
+  geom_col(fill = "steelblue") +
+  labs(title = "Feature Importance of PCA Components",
+       x = "Gain",
+       y = "PCA Components with Key Variables") +
+  theme_minimal()
+
+
+
+```
+
+```{r}
+# XGBoost with Regularization 
+# Prepare data for XGBoost
+dtrain_pca <- xgb.DMatrix(data = as.matrix(pca_data_reg_train[,-1]), label = pca_data_reg_train$Price)
+dtest_pca <- xgb.DMatrix(data = as.matrix(pca_data_reg_test[,-1]), label = pca_data_reg_test$Price)
+
+# Parameters for XGBoost with Regularization
+params_reg <- list(
+  booster = "gbtree",
+  objective = "reg:squarederror",
+  eta = 0.1,
+  max_depth = 6,
+  min_child_weight = 1,
+  subsample = 0.75,
+  colsample_bytree = 0.75,
+  lambda = 1,  # L2 regularization
+  alpha = 0.5  # L1 regularization
+)
+
+# Correct the dataset references for the training process
+xgb_model_reg <- xgb.train(params = params_reg, data = dtrain_pca, nrounds = 100)
+
+# Correct the dataset references for prediction
+pred_reg_train <- predict(xgb_model_reg, dtrain_pca)
+pred_reg_test <- predict(xgb_model_reg, dtest_pca)
+
+
+# Assuming that `pca_data_reg_train` and `pca_data_reg_test` contain the actual Price column for comparison
+train_rmse_reg_xgb <- sqrt(mean((pca_data_reg_train$Price - pred_reg_train)^2))
+test_rmse_reg_xgb <- sqrt(mean((pca_data_reg_test$Price - pred_reg_test)^2))
+
+train_r2_reg_xgb <- cor(pca_data_reg_train$Price, pred_reg_train)^2
+test_r2_reg_xgb <- cor(pca_data_reg_test$Price, pred_reg_test)^2
+
+
+cat("Training RMSE with XGBoost Regularization:", train_rmse_reg_xgb, "\n")
+cat("Training R-squared with XGBoost Regularization:", train_r2_reg_xgb, "\n")
+cat("Testing RMSE with XGBoost Regularization:", test_rmse_reg_xgb, "\n")
+cat("Testing R-squared with XGBoost Regularization:", test_r2_reg_xgb, "\n")
+
+
+```
+
+```{r}
+library(xgboost)
+
+# Define feature names based on the number of PCA components
+feature_names <- paste0("PC", 1:22)
+
+# Compute feature importance using the correct feature names
+importance_matrix <- xgb.importance(feature_names = feature_names, model = xgb_model_reg)
+
+# Print the importance matrix
+print(importance_matrix)
+
+# Plot feature importance
+xgb.plot.importance(importance_matrix)
+
+```
+
+
+
+```{r}
+
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+
+```{r}
+
+```
+
